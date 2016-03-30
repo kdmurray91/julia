@@ -939,15 +939,6 @@ static void jl_finalize_module(std::unique_ptr<Module> uniquem)
     Module *m = uniquem.release(); // unique_ptr won't be able track what we do with this (the invariant is recovered by jl_finalize_function)
     finalize_gc_frame(m);
 #if !defined(USE_ORCJIT)
-#ifdef LLVM33
-#ifdef JL_DEBUG_BUILD
-    if (verifyModule(*m, PrintMessageAction)) {
-        m->dump();
-        gc_debug_critical_error();
-        abort();
-    }
-#endif
-#endif
     PM->run(*m);
 #endif
 #ifdef USE_MCJIT
@@ -1135,17 +1126,17 @@ void jl_extern_c(jl_function_t *f, jl_value_t *rt, jl_value_t *argt, char *name)
     Function *llvmf = jl_cfunction_object(f, rt, (jl_tupletype_t*)argt);
     if (llvmf) {
         // force eager emission of the function (llvm 3.3 gets confused otherwise and tries to do recursive compilation)
-        uint64_t Addr = getAddressForFunction(llvmf); (void)Addr;
-        // emit the function pointer and set up an alias in the execution engine
+        uint64_t Addr = getAddressForFunction(llvmf);
+
 #if defined(USE_ORCJIT) || defined(USE_MCJIT)
-        jl_ExecutionEngine->addGlobalMapping(name, Addr);
         if (imaging_mode)
              // in the old JIT, the shadow_module aliases the engine_module,
-             // otherwise, adding it as a global mapping is needed unconditionally
+             // otherwise, just point the alias to the declaration
 #endif
-        {
             llvmf = cast<Function>(shadow_output->getNamedValue(llvmf->getName()));
-            // in imaging_mode, also need to add the alias to the shadow_module
+
+        // make the alias to the shadow_module
+        GlobalAlias *GA =
 #if defined(LLVM38)
             GlobalAlias::create(llvmf->getType()->getElementType(), llvmf->getType()->getAddressSpace(),
                                 GlobalValue::ExternalLinkage, name, llvmf, shadow_output);
@@ -1155,7 +1146,13 @@ void jl_extern_c(jl_function_t *f, jl_value_t *rt, jl_value_t *argt, char *name)
 #else
             new GlobalAlias(llvmf->getType(), GlobalValue::ExternalLinkage, name, llvmf, shadow_output);
 #endif
-        }
+
+#if defined(USE_ORCJIT) || defined(USE_MCJIT)
+        // make the alias name is valid for the current session
+        jl_ExecutionEngine->addGlobalMapping(GA, (void*)(uintptr_t)Addr);
+#else
+        (void)GA; (void)Addr;
+#endif
     }
 }
 
@@ -1385,8 +1382,7 @@ const jl_value_t *jl_dump_function_asm(void *f, int raw_mc)
 #ifdef USE_MCJIT
     // Look in the system image as well
     if (fptr == 0)
-        fptr = (uintptr_t)jl_ExecutionEngine->getPointerToGlobalIfAvailable(
-            jl_ExecutionEngine->getMangledName(llvmf));
+        fptr = (uintptr_t)jl_ExecutionEngine->getPointerToGlobalIfAvailable(llvmf);
     llvm::DIContext *context = NULL;
     llvm::DIContext *&objcontext = context;
 #else
@@ -3526,23 +3522,18 @@ static void finalize_gc_frame(Function *F)
 
     GlobalVariable *GV = NULL;
     if (oldGV) {
-        GV = M->getGlobalVariable(oldGV->getName(), true /* AllowLocal */);
+        GV = cast<GlobalVariable>(M->getNamedValue(oldGV->getName()));
         if (GV == NULL) {
-            GV = new GlobalVariable(*M, oldGV->getType()->getElementType(),
-                                    oldGV->isConstant(),
-                                    GlobalValue::ExternalLinkage, NULL,
-                                    oldGV->getName());
-            GV->copyAttributesFrom(oldGV);
+            GV = global_proto(GV, M);
         }
     }
 
 #ifdef JULIA_ENABLE_THREADING
-    if (GV) {
+    if (imaging_mode) {
         Value *getter = tbaa_decorate(tbaa_const,
                                       new LoadInst(GV, "", ptlsStates));
         ptlsStates->setCalledFunction(getter);
     }
-    ptlsStates->setAttributes(jltls_states_func->getAttributes());
 #else
     ptlsStates->replaceAllUsesWith(GV);
     ptlsStates->eraseFromParent();
@@ -5131,8 +5122,7 @@ static void init_julia_llvm_env(Module *m)
         // make the pointer valid for this session
 #if defined(USE_MCJIT) || defined(USE_ORCJIT)
         auto p = new uintptr_t(0);
-        jl_ExecutionEngine->addGlobalMapping(jltls_states_func_ptr->getName(),
-                                             (uintptr_t)p);
+        jl_ExecutionEngine->addGlobalMapping(jltls_states_func_ptr, p);
 #else
         uintptr_t *p = (uintptr_t*)jl_ExecutionEngine->getPointerToGlobal(jltls_states_func_ptr);
 #endif
