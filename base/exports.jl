@@ -901,7 +901,6 @@ export
     utf32,
     warn,
     wstring,
-    xdump,
 
 # random numbers
     AbstractRNG,
