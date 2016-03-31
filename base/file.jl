@@ -12,6 +12,7 @@ export
     mkpath,
     mktemp,
     mktempdir,
+    intempdir,
     mv,
     pwd,
     rename,
@@ -270,6 +271,15 @@ function mktempdir(fn::Function, parent=tempdir())
     tmpdir = mktempdir(parent)
     try
         fn(tmpdir)
+    finally
+        rm(tmpdir, recursive=true)
+    end
+end
+
+function intempdir(fn::Function, parent=tempdir())
+    tmpdir = mktempdir(parent)
+    try
+        cd(fn, tmpdir)
     finally
         rm(tmpdir, recursive=true)
     end
